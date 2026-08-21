@@ -1,0 +1,54 @@
+name: sync-upstream
+
+on:
+  schedule:
+    # Daily at 02:33 UTC; GitHub crons only run on the default branch.
+    - cron: "33 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream/main into main
+        id: sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/XxHuberrr/Mineradio.git
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            echo "main already contains upstream/main"
+            exit 0
+          fi
+          # A merge conflict fails the job on purpose: resolve locally instead of force-pushing.
+          git merge --no-edit upstream/main
+          git push origin main
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Feishu
+        if: always()
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          SYNC_UPDATED: ${{ steps.sync.outputs.updated }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          case "$SYNC_UPDATED" in
+            true) outcome="synced: merged new upstream commits" ;;
+            false) outcome="no-op: already contains upstream" ;;
+            *) outcome="failed before merge" ;;
+          esac
+          text="[${REPO}] sync-upstream ${JOB_STATUS} (${outcome}); run ${RUN_ID}"
+          jq -n --arg text "$text" '{msg_type: "text", content: {text: $text}}' > payload.json
+          curl -fsS -X POST -H "Content-Type: application/json" -d @payload.json "$FEISHU_WEBHOOK_URL"
